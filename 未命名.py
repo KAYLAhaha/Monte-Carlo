@@ -3,32 +3,29 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 class CorrelatedRandomNumberGenerator:
-    def __init__(self, num_steps, num_assets, cov_matrix, seed=None):
+    def __init__(self, num_steps, num_assets, cov_matrix):
         self.num_steps = num_steps  
         self.num_assets = num_assets 
-        self.cov_matrix = cov_matrix  
-        self.seed = seed 
-        if seed is not None:
-            np.random.seed(seed)  
+        self.cov_matrix = cov_matrix
+         # Cholesky decomposition of the covariance matrix
+        # L.T * L = cov_matrix
+        self.L = np.linalg.cholesky(self.cov_matrix).T
+        self.seed = None
 
-    def generate(self):
+    def generate(self, num_paths, seed=2025):
         """ Generate relevant standard normally distributed random numbers, Shape of(num_steps, num_assets) """
-        Z = np.random.normal(0, 1, (self.num_steps, self.num_assets))
-        
-        # Cholesky decomposition of the covariance matrix
-        L = np.linalg.cholesky(self.cov_matrix)  
-
+        np.random.seed(seed)
+        self.seed = seed
+        Z = np.random.normal(0, 1, (num_paths, self.num_steps, self.num_assets))
         # Converting independent standard normally distributed random numbers into correlated random numbers
-        correlated_Z = np.dot(Z, L.T)  
+        correlated_Z = Z @ self.L
 
         return correlated_Z
-
-
-# In[27]:
-
-
+    
 class PathGenerator:
     def __init__(self, S0, r, sigma, T, dt, num_assets, random_number_generator):
+    #   def __init__(self, S0, r, sigma, T, sim_times, num_assets, random_number_generator):
+            # self.dts = np.diff(sim_times)
         self.S0 = S0  
         self.r = r   
         self.sigma = sigma 
@@ -38,23 +35,21 @@ class PathGenerator:
         self.num_assets = num_assets
         self.random_number_generator = random_number_generator
 
-    def generate_paths(self):
+    def generate_paths(self, num_paths):
         """ Time-first: generates prices for all assets in time steps """
-        Z = self.random_number_generator.generate() 
-        paths = np.zeros((self.num_steps + 1, self.num_assets))
-        paths[0] = self.S0  
-        
-        for n in range(1, self.num_steps + 1):
-            paths[n] = paths[n-1] * np.exp(
-                (self.r - 0.5 * self.sigma ** 2) * self.dt + self.sigma * np.sqrt(self.dt) * Z[n-1]
-            )
+        Z = self.random_number_generator.generate(num_paths) 
+        paths = []
+        for i in range(num_paths):
+            paths.append([np.array([self.S0] * self.num_assets)])
+            p = paths[-1]
+
+            for n in range(1, self.num_steps + 1):
+                S = p[-1] * np.exp(
+                    (self.r - 0.5 * self.sigma ** 2) * self.dt + self.sigma * np.sqrt(self.dt) * Z[i][n-1]
+                    # (self.r - 0.5 * self.sigma ** 2) * self.dts[n] + self.sigma * np.sqrt(self.dts[n]) * Z[n-1]
+                )
+                p.append(S)
         return paths
-
-   
-
-
-# In[32]:
-
 
 
 path_generator = PathGenerator(S0, r, sigma, T, dt, num_assets, correlated_random_number_generator)
@@ -263,7 +258,7 @@ cov_matrix = np.array([
 ])  # Covariance matrix of the two assets
 
 random_number_generator = CorrelatedRandomNumberGenerator(
-    num_steps=252, num_assets=num_assets, cov_matrix=cov_matrix, seed=42)
+    num_steps=252, num_assets=num_assets, cov_matrix=cov_matrix)
 
 path_generator = PathGenerator(S0, r, sigma, T, dt, num_assets, random_number_generator)
 
