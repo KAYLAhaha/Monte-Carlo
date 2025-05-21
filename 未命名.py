@@ -1,8 +1,5 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-
 import numpy as np
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 class CorrelatedRandomNumberGenerator:
@@ -59,7 +56,6 @@ class PathGenerator:
 # In[32]:
 
 
-import matplotlib.pyplot as plt
 
 path_generator = PathGenerator(S0, r, sigma, T, dt, num_assets, correlated_random_number_generator)
 paths = path_generator.generate_paths()
