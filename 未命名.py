@@ -102,9 +102,8 @@ class RangeAccrualPayoff:
             t_k = self.early_termination_times[t]
             t_k_1 = self.early_termination_times[t-1]
             
-            # 检查当前时间点t_k是否触发KO
-            S_tk = paths[t_k]  # 假设paths的索引对应时间点
-            performance_tk = S_tk / self.S0  # 当前时间点的表现
+            S_tk = paths[t_k]  
+            performance_tk = S_tk / self.S0  
             
             # Get current knockout barriers (assuming B_KO is a list, corresponding to the point in time)
             B_KO_k = self.B_KO[t] if isinstance(self.B_KO, list) else self.B_KO
@@ -166,8 +165,8 @@ class MonteCarloPricer:
         original_S0 = self.path_generator.S0  
         
         # calculate PV(S0 + delta_S)
-        self.path_generator.S0 = original_S0 + self.delta_S
-        self.payoff.S0 = original_S0 + self.delta_S  # 同步更新 payoff 的 S0
+        self.path_generator.S0 = original_S0 + self.delta_S # Update S0 of path_generator
+        self.payoff.S0 = original_S0 + self.delta_S  # Update S0 of payoff
         pv_up = self.price()
         
         # calculate PV(S0 - delta_S)
