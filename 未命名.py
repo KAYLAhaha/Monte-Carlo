@@ -148,39 +148,6 @@ class RangeAccrualPayoff:
         return payoffs
 
 
-# In[98]:
-
-
-S0 = 100  # 初始资产价格
-r = 0.05  # 无风险利率
-sigma = 0.2  # 波动率
-T = 1  # 到期时间（1年）
-dt = 1/252  # 每天为时间步长
-num_paths = 10000  # 模拟路径数量
-num_assets = 2 
-L = 1
-early_termination_times = [0, 50, 100, 150, 200, 252]  # 早期终止时间点（以天为单位）
-c1 = 1  # 低支付
-c2 = 2  # 高支付
-B_KO = 1.02
-
-# 随机数生成器和路径生成器实例
-cov_matrix = np.array([
-    [0.02, 0.01], 
-    [0.01, 0.03]
-])  # 协方差矩阵
-
-random_number_generator = CorrelatedRandomNumberGenerator(
-    num_steps=252, num_assets=num_assets, cov_matrix=cov_matrix, seed=42)
-
-path_generator = PathGenerator(S0, r, sigma, T, dt, num_assets, correlated_random_number_generator)
-
-# 生成路径
-paths = path_generator.generate_paths()
-
-payoff = RangeAccrualPayoff(S0, K=1.01, T=T, dt=dt, early_termination_times=early_termination_times, c1=c1, c2=c2, B_KO=B_KO)
-print(payoff.compute(paths))
-
 
 # In[85]:
 
