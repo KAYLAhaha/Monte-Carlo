@@ -15,7 +15,7 @@ class CorrelatedRandomNumberGenerator:
             np.random.seed(seed)  
 
     def generate(self):
-        """ 生成相关的标准正态分布随机数，形状为 (num_steps, num_assets) """
+        """ Generate relevant standard normally distributed random numbers, Shape of(num_steps, num_assets) """
         Z = np.random.normal(0, 1, (self.num_steps, self.num_assets))
         
         # Cholesky decomposition of the covariance matrix
