@@ -1,0 +1,272 @@
+import numpy as np
+
+class CorrelatedRandomNumberGenerator:
+    def __init__(self, num_steps, num_assets, cov_matrix):
+        self.num_steps = num_steps  
+        self.num_assets = num_assets 
+        self.cov_matrix = cov_matrix
+         # Cholesky decomposition of the covariance matrix
+        # L.T * L = cov_matrix
+        self.L = np.linalg.cholesky(self.cov_matrix).T
+        self.seed = None
+
+    def generate(self, num_paths, seed=2025): 
+        """ Generate relevant standard normally distributed random numbers, Shape of(num_steps, num_assets) """
+        np.random.seed(seed)
+        self.seed = seed
+        Z = np.random.normal(0, 1, (num_paths, self.num_steps, self.num_assets))
+        # Converting independent standard normally distributed random numbers into correlated random numbers
+        correlated_Z = Z @ self.L
+
+        return correlated_Z
+
+class PathGenerator:
+    def __init__(self, S0, r, sigma, T, sim_times, num_assets, random_number_generator):
+        self.S0 = S0  
+        self.r = r   
+        self.sigma = sigma 
+        self.T = T    
+        self.sim_times = sim_times
+        self.dts = np.diff(sim_times) # 每一步的 Δt（可以不等长）
+        self.num_steps = len(sim_times) - 1
+        self.num_assets = num_assets
+        self.random_number_generator = random_number_generator
+
+    def generate_paths(self, num_paths):
+        """ Time-first: generates prices for all assets in time steps """
+        Z = self.random_number_generator.generate(num_paths) 
+        paths = []
+        for i in range(num_paths):
+            paths.append([np.array([self.S0] * self.num_assets)])
+            p = paths[-1]
+
+            for n in range(1, self.num_steps + 1):
+                S = p[-1] * np.exp(
+                    (self.r - 0.5 * self.sigma ** 2) * self.dts[n-1] + self.sigma * np.sqrt(self.dts[n-1]) * Z[i][n-1]
+                )
+                p.append(S)
+        return paths
+
+import numpy as np
+from scipy.stats import norm
+
+class RangeAccrualPayoff:
+    def __init__(self, S_ref, K, early_termination_times, c1, c2, B_KO, total_days, L, sigma):
+        self.S_ref = S_ref
+        self.K = K
+        self.early_termination_times = early_termination_times
+        self.c1 = c1
+        self.c2 = c2
+        self.B_KO = B_KO
+        self.total_days = total_days
+        self.daily_Δt = 1/252
+        self.L = L  # Simulation interval L
+        self.sigma = sigma  # Volatility (can be constant or a time-varying function)
+        
+        # Create sparse time grid
+        times = np.linspace(0, 1, total_days + 1)
+        self.sim_times = times[::L]
+        if times[-1] not in self.sim_times:
+            self.sim_times = np.append(self.sim_times, times[-1])
+        self.dts = np.diff(self.sim_times)  # Time intervals of sparse grid
+
+    def compute(self, paths):
+        num_paths = len(paths)
+        num_periods = len(self.early_termination_times) - 1
+        payoffs = np.zeros((num_paths, num_periods))
+        
+        for path_idx in range(num_paths):
+            knocked_out = False
+            path = paths[path_idx]
+            
+            for k in range(1, len(self.early_termination_times)):
+                if knocked_out:
+                    break  # Skip further calculation if KO is triggered
+
+                t_k = self.early_termination_times[k]
+                t_k_1 = self.early_termination_times[k-1]
+                
+                # Find the start and end indices of the current observation period in sparse time grid
+                start_idx = np.searchsorted(self.sim_times, t_k_1, side='left')
+                end_idx = np.searchsorted(self.sim_times, t_k, side='right') - 1
+                
+                # Initialize the number of in-range days A_k for this observation period
+                A_k = 0
+
+                # Check KO at the end of the observation period
+                S_tk = path[end_idx]
+                performance_tk = S_tk / self.S_ref 
+                
+                B_KO_k = self.B_KO[k] if isinstance(self.B_KO, list) else self.B_KO
+
+                if np.any(performance_tk >= B_KO_k):
+                    knocked_out = True  # KO event triggered
+                
+                # Traverse sparse time intervals
+                for j in range(start_idx, end_idx):
+                    # Start and end times of current sparse interval
+                    t_start = self.sim_times[j]
+                    t_end = self.sim_times[j+1]
+                    
+                    # Get current prices
+                    S_jL = path[j]
+                    S_jL_next = path[j+1]
+                    
+                    performance_jL = S_jL / self.S_ref
+                    performance_jL_next = S_jL_next / self.S_ref
+                    
+                    # Find the worst performing asset
+                    worst_asset_j = np.argmin(performance_jL)
+                    worst_asset_j_next = np.argmin(performance_jL_next)
+        
+                    # Extract the worst performing asset’s prices
+                    S_jL_worst = S_jL[worst_asset_j]
+                    S_jL_next_worst = S_jL_next[worst_asset_j_next]
+                   
+                    # Compute volatility at time t_start
+                    sigma_val = self.sigma(t_start) if callable(self.sigma) else self.sigma
+                    
+                    # Compute probability of being in range at each sub-time point l
+                    for l in range(1, self.L + 1):
+                        t_current = t_start + l * self.daily_Δt
+                        
+                        # Skip time points not in the observation period
+                        if t_current < t_k_1 or t_current > t_k:
+                            continue
+                        
+                        if l < self.L:
+                            # Apply conditional probability formula
+                            term1 = self.L * np.log(self.K * self.S_ref / S_jL_worst)
+                            term2 = -l * np.log(S_jL_next_worst / S_jL_worst)
+                            denominator = np.sqrt(l * self.L * (self.L - l) * self.daily_Δt) * sigma_val
+                            
+                            if abs(denominator) < 1e-10:
+                                prob = 1.0 if (term1 + term2) >= 0 else 0.0
+                            else:
+                                Z_val = (term1 + term2) / denominator
+                                prob = 1 - norm.cdf(Z_val)
+                            
+                            A_k += prob
+                        else:  # l = L
+                            # Use worst performance to check range
+                            if np.min(performance_jL_next) >= self.K:
+                                A_k += 1.0
+                
+                # Compute payoff for this observation period
+                A_k_annual = A_k * self.daily_Δt
+                C_k = (1 - A_k_annual/(t_k - t_k_1)) * self.c1 + (A_k_annual/(t_k - t_k_1)) * self.c2
+                payoffs[path_idx, k-1] = C_k
+        
+        return payoffs
+
+from tqdm import tqdm
+
+class MonteCarloPricer:
+    def __init__(self, path_generator, payoff, num_paths, delta_S=1.0):
+        self.path_generator = path_generator  # Path generator
+        self.payoff = payoff  # Payoff calculator
+        self.num_paths = num_paths  # Number of Monte Carlo paths
+        self.delta_S = delta_S
+
+        # Shared parameters extracted from path_generator and payoff
+        self.S0 = self.path_generator.S0
+        self.r = self.path_generator.r
+        self.sigma = self.path_generator.sigma
+        self.T = self.path_generator.T
+        self.dts = self.path_generator.dts
+        self.num_assets = self.path_generator.num_assets
+        self.random_number_generator = self.path_generator.random_number_generator
+        self.S_ref = self.payoff.S_ref
+        self.early_termination_times = self.payoff.early_termination_times
+        
+    def price(self, paths=None):
+        """ Compute present value, optionally using provided paths (used in Greeks calculation) """
+        if paths is None:
+            paths = self.path_generator.generate_paths(self.num_paths)
+
+        path_payoffs = self.payoff.compute(paths)  # Shape (num_paths, num_periods)
+        payoff = np.sum(path_payoffs, axis=1)  # Sum over periods
+        pv = np.mean(payoff)
+        return pv
+
+    def compute_greeks(self):
+        """ Efficiently compute Greeks using path scaling """
+        original_paths = self.path_generator.generate_paths(self.num_paths)
+        original_paths = np.array(original_paths)
+
+        # Scale paths upward
+        scale_factor_up = (self.S0 + self.delta_S) / self.S0
+        paths_up = original_paths * scale_factor_up
+        pv_up = self.price(paths=paths_up)
+
+        # Scale paths downward
+        scale_factor_down = (self.S0 - self.delta_S) / self.S0
+        paths_down = original_paths * scale_factor_down
+        pv_down = self.price(paths=paths_down)
+
+        pv_base = self.price(paths=original_paths)
+
+        delta = (pv_up - pv_down) / (2 * self.delta_S)
+        gamma = (pv_up - 2 * pv_base + pv_down) / (self.delta_S ** 2)
+        return delta, gamma
+    
+    def generate_spot_ladders(self, S0_range):
+        """ Generate spot ladder data for PV, Delta, and Gamma """
+        pv_ladder = []
+        delta_ladder = []
+        gamma_ladder = []
+        
+        original_S0 = self.S0  # Save original spot price
+        
+        for S in tqdm(S0_range, desc="Generating Spot Ladders"):
+            self.path_generator.S0 = S
+            self.payoff.S0 = S
+            
+            pv = self.price()
+            delta, gamma = self.compute_greeks()
+            
+            pv_ladder.append(pv)
+            delta_ladder.append(delta)
+            gamma_ladder.append(gamma)
+        
+        # Restore original spot price
+        self.path_generator.S0 = original_S0
+        self.payoff.S0 = original_S0
+        
+        return {
+            "S0": S0_range,
+            "PV": np.array(pv_ladder),
+            "Delta": np.array(delta_ladder),
+            "Gamma": np.array(gamma_ladder)
+        }
+
+    def plot_ladders(ladder_data):
+        """ Plot spot ladder graphs """
+        plt.figure(figsize=(15, 5))
+        
+        # PV-Spot
+        plt.subplot(1, 3, 1)
+        plt.plot(ladder_data["S0"], ladder_data["PV"], "b-o")
+        plt.title("PV-Spot Ladder")
+        plt.xlabel("Spot Price")
+        plt.ylabel("Present Value")
+        plt.grid(True)
+        
+        # Delta-Spot
+        plt.subplot(1, 3, 2)
+        plt.plot(ladder_data["S0"], ladder_data["Delta"], "r-o")
+        plt.title("Delta-Spot Ladder")
+        plt.xlabel("Spot Price")
+        plt.ylabel("Delta")
+        plt.grid(True)
+        
+        # Gamma-Spot
+        plt.subplot(1, 3, 3)
+        plt.plot(ladder_data["S0"], ladder_data["Gamma"], "g-o")
+        plt.title("Gamma-Spot Ladder")
+        plt.xlabel("Spot Price")
+        plt.ylabel("Gamma")
+        plt.grid(True)
+        
+        plt.tight_layout()
+        plt.show()
