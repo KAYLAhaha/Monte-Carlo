@@ -305,3 +305,17 @@ class MonteCarloPricer:
         
         plt.tight_layout()
         plt.show()
+
+
+S0_range = np.linspace(80, 120, 20)  # Spot price range
+num_paths = 1000
+delta_S = 1.0
+    
+correlated_random_number_generator = CorrelatedRandomNumberGenerator(num_steps=num_steps, num_assets=num_assets, cov_matrix=cov_matrix)
+path_generator = PathGenerator(S0, r, sigma, T, sim_times, num_assets, correlated_random_number_generator)
+payoff = RangeAccrualPayoff(S_ref, K=1.01, early_termination_times=early_termination_times, c1=c1, c2=c2, B_KO=B_KO, total_days=total_days, L=L,sigma=sigma)
+monte_carlo_pricer = MonteCarloPricer(path_generator, payoff, num_paths=1000)
+
+ladder_data = monte_carlo_pricer.generate_spot_ladders(S0_range)
+graph = plot_ladders(ladder_data)
+print(graph)
