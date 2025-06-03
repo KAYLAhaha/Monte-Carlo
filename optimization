@@ -35,16 +35,17 @@ class PathGenerator:
     def generate_paths(self, num_paths):
         """ Time-first: generates prices for all assets in time steps """
         Z = self.random_number_generator.generate(num_paths) 
-        paths = []
-        for i in range(num_paths):
-            paths.append([np.array([self.S0] * self.num_assets)])
-            p = paths[-1]
-
-            for n in range(1, self.num_steps + 1):
-                S = p[-1] * np.exp(
-                    (self.r - 0.5 * self.sigma ** 2) * self.dts[n-1] + self.sigma * np.sqrt(self.dts[n-1]) * Z[i][n-1]
-                )
-                p.append(S)
+        paths = np.zeros((num_paths, self.num_steps + 1, self.num_assets))
+        paths[:, 0, :] = self.S0
+        
+        # vectorized computation
+        for n in range(1, self.num_steps + 1):
+            drift = (self.r - 0.5 * self.sigma ** 2) * self.dts[n-1]
+            diffusion = self.sigma * np.sqrt(self.dts[n-1])
+            paths[:, n, :] = paths[:, n-1, :] * np.exp(
+                (self.r - 0.5 * self.sigma ** 2) * self.dts[n-1] + self.sigma * np.sqrt(self.dts[n-1]) * Z[:, n-1, :]
+            )
+        
         return paths
 
 # Vectorized conditional probability computation
@@ -72,106 +73,125 @@ class RangeAccrualPayoff:
         self.dts = np.diff(self.sim_times)  # Time intervals of sparse grid
         
     def compute(self, paths):
-        num_paths = len(paths)
+        """Fully vectorized payoff calculation"""
+        num_paths, num_timesteps, num_assets = paths.shape
         num_periods = len(self.early_termination_times) - 1
         payoffs = np.zeros((num_paths, num_periods))
+    
+        performances = paths / self.S_ref
+        worst_asset_indices = np.argmin(performances, axis=2)
+    
+        # Extract the worst asset price paths
+        worst_performances = np.zeros((num_paths, num_timesteps))
+        for t in range(num_timesteps):
+            worst_performances[:, t] = performances[
+                np.arange(num_paths), t, worst_asset_indices[:, t]
+            ]
         
-        for path_idx in range(num_paths):
-            knocked_out = False
-            path = paths[path_idx]
+        # Initialize KO (knock-out) events
+        ko_events = np.zeros((num_paths, num_periods), dtype=bool)
+        for k in range(1, len(self.early_termination_times)):
+            t_k = self.early_termination_times[k]
+            idx = np.searchsorted(self.sim_times, t_k, side='right') - 1
             
-            for k in range(1, len(self.early_termination_times)):
-                if knocked_out:
-                    break  # KO already triggered, skip remaining periods
-                    
-                t_k = self.early_termination_times[k]
-                t_k_1 = self.early_termination_times[k - 1]
+            # Get the performance of all assets at this time point for all paths
+            perf_at_tk = performances[:, idx, :]  # Shape (num_paths, num_assets)
+           
+            B_KO_k = self.B_KO[k] if isinstance(self.B_KO, list) else self.B_KO
+            ko_events[:, k-1] = np.any(perf_at_tk >= B_KO_k, axis=1)
+        
+        # Carry forward KO events from previous periods
+        ko_prev = np.zeros((num_paths, num_periods), dtype=bool)
+        for k in range(num_periods):
+            if k == 0:
+                ko_prev[:, k] = False  # No "previous" KO event in the first period
+            else:
+                ko_prev[:, k] = np.any(ko_events[:, :k], axis=1)
+    
+        # Calculate A_k for each observation period
+        for k in range(1, len(self.early_termination_times)):
+            t_k = self.early_termination_times[k]
+            t_k_1 = self.early_termination_times[k-1]
+            
+            start_idx = np.searchsorted(self.sim_times, t_k_1, side='left')
+            end_idx = np.searchsorted(self.sim_times, t_k, side='right') - 1
+            
+            # Skip paths that are already knocked out
+            active_paths = ~ko_prev[:, k-1]
+            if not np.any(active_paths):
+                continue
+            
+            # Initialize A_k
+            A_k = np.zeros(num_paths)
+            
+            # Process each sparse time interval
+            for j in range(start_idx, end_idx):
+                t_start = self.sim_times[j]
+                t_end = self.sim_times[j+1]
                 
-                # Find the start and end indices of the observation period in the sparse time grid
-                start_idx = np.searchsorted(self.sim_times, t_k_1, side='left')
-                end_idx = np.searchsorted(self.sim_times, t_k, side='right') - 1
+                # Get the worst performance at the current and next time points
+                S_jL_worst = worst_performances[active_paths, j]  # Already relative to S_ref
+                S_jL_next_worst = worst_performances[active_paths, j+1]
                 
-                # Initialize the number of in-range days A_k for the current observation period
-                A_k = 0
+                sigma_val = self.sigma(t_start) if callable(self.sigma) else self.sigma
                 
-                # Check whether KO is triggered at the end of the observation period
-                S_tk = path[end_idx]
-                performance_tk = S_tk / self.S_ref
+                l_values = np.arange(1, self.L + 1)
                 
-                B_KO_k = self.B_KO[k] if isinstance(self.B_KO, list) else self.B_KO
-                if np.any(performance_tk >= B_KO_k):
-                    knocked_out = True  # KO triggered
-                    
-                # Iterate through sparse intervals
-                for j in range(start_idx, end_idx):
-                    # Start and end times of the current sparse interval
-                    t_start = self.sim_times[j]
-                    t_end = self.sim_times[j + 1]
-                    
-                    # Get current and next prices
-                    S_jL = path[j]
-                    S_jL_next = path[j + 1]
-                    
-                    performance_jL = S_jL / self.S_ref
-                    performance_jL_next = S_jL_next / self.S_ref
-                    
-                    # Identify the worst performing asset
-                    worst_asset_j = np.argmin(performance_jL)
-                    worst_asset_j_next = np.argmin(performance_jL_next)
-
-                    # Extract the worst performing asset's price
-                    S_jL_worst = S_jL[worst_asset_j]
-                    S_jL_next_worst = S_jL_next[worst_asset_j_next]
-                   
-                    # Get current volatility
-                    sigma_val = self.sigma(t_start) if callable(self.sigma) else self.sigma
-                    
-                    # ======== Vectorized computation of probabilities ========
-                    l_values = np.arange(1, self.L + 1)
-
-                    # Compute all corresponding time points for l
-                    t_current_values = t_start + l_values * self.daily_Δt
-
-                    # Filter time points within the current observation window
-                    in_observation = (t_current_values >= t_k_1) & (t_current_values <= t_k)
-                    valid_l = l_values[in_observation]
-
-                    if len(valid_l) == 0:
-                        continue
-
-                    # Separate l < L and l == L
-                    l_less = valid_l[valid_l < self.L]
-                    l_equal = valid_l[valid_l == self.L]
-
-                    # Vectorized computation for l < L
-                    if len(l_less) > 0:
-                        term1 = self.L * np.log(self.K * self.S_ref / S_jL_worst)
-                        term2 = -l_less * np.log(S_jL_next_worst / S_jL_worst)
-                        denominator = np.sqrt(l_less * self.L * (self.L - l_less) * self.daily_Δt) * sigma_val
-
-                        # Handle near-zero denominators
-                        safe_denom = np.where(np.abs(denominator) < 1e-10, 1e-10, denominator)
-                        Z_val = (term1 + term2) / safe_denom
-
-                        # Vectorized computation of CDF
-                        probs = 1 - norm.cdf(Z_val)
-
-                        # Handle exact-zero denominators (avoid divide-by-zero)
-                        mask = np.abs(denominator) < 1e-10
-                        probs[mask] = np.where((term1 + term2)[mask] >= 0, 1.0, 0.0)
-
-                        A_k += np.sum(probs)
-
-                    # Handle l = L case separately
-                    if len(l_equal) > 0 and np.min(performance_jL_next) >= self.K:
-                        A_k += 1.0
+                # Compute all corresponding time points for l
+                t_current_values = t_start + l_values * self.daily_Δt
+               
+                in_observation = (t_current_values >= t_k_1) & (t_current_values <= t_k)
+                valid_l = l_values[in_observation]
                 
-                # Calculate cash flow for current observation period
-                A_k_annual = A_k * self.daily_Δt
-                C_k = (1 - A_k_annual / (t_k - t_k_1)) * self.c1 + (A_k_annual / (t_k - t_k_1)) * self.c2
-                payoffs[path_idx, k - 1] = C_k
-
+                if len(valid_l) == 0:
+                    continue
+                
+                # Separate cases where l < L and l = L
+                l_less = valid_l[valid_l < self.L]
+                l_equal = valid_l[valid_l == self.L]
+                
+                # Vectorized calculation of probabilities for l < L (calculated for all active paths simultaneously)
+                if len(l_less) > 0:
+                    # Pre-calculate common terms
+                    log_ratio = np.log(S_jL_next_worst / S_jL_worst)
+                    term1 = self.L * np.log(self.K / S_jL_worst)  # No need for S_ref because it's already relative performance
+                    
+                    # Vectorized calculation (paths dimension x l dimension)
+                    term2 = -l_less * log_ratio[:, None]  # Convert to column vector
+                    denominator = np.sqrt(l_less * self.L * (self.L - l_less) * self.daily_Δt) * sigma_val
+                    
+                    # Handle cases where the denominator is close to zero
+                    safe_denom = np.where(np.abs(denominator) < 1e-10, 1e-10, denominator)
+                    Z_val = (term1[:, None] + term2) / safe_denom
+                    
+                    probs = 1 - norm.cdf(Z_val)
+                    
+                    # Handle special cases where the denominator is zero
+                    zero_mask = np.abs(denominator) < 1e-10
+                    numerators = term1[:, None] + term2
+    
+                    # Directly use boolean indexing
+                    for i in range(len(l_less)):
+                        if zero_mask[i]:
+                            # For the i-th column where the denominator is close to zero
+                            probs[:, i] = np.where(numerators[:, i] >= 0, 1.0, 0.0)
+    
+                    A_k[active_paths] += np.sum(probs, axis=1)
+                
+                # Handle the case where l = L
+                if len(l_equal) > 0:
+                    l_equal_mask = S_jL_next_worst >= self.K
+                    A_k[active_paths] += l_equal_mask
+            
+            A_k_annual = A_k * self.daily_Δt
+            C_k = (1 - A_k_annual/(t_k - t_k_1)) * self.c1 + (A_k_annual/(t_k - t_k_1)) * self.c2
+            
+            # Set the payoff for KO paths to 0
+            C_k[ko_prev[:, k-1]] = 0
+            payoffs[:, k-1] = C_k
+    
         return payoffs
+
 
 
 from tqdm import tqdm
